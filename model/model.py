@@ -77,6 +77,8 @@ import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 import torch.nn.functional as F
 from .activation_functions import ACT2FN
+from transformers import PreTrainedModel, GenerationMixin
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 # 继承nn.Module类
 class RMSNorm(nn.Module):
@@ -315,27 +317,150 @@ class FeedForward(nn.Module):
                 )
             )
     
-    class CarsonMindModel(nn.Module):
-        def __init__(self, layer_id:int, config:CarsonMindConfig):
-            super().__init__()
-            self.num_attention_heads = config.num_attention_heads
-            self.hidden_size = config.hidden_size
-            self.head_dim = self.hidden_size // self.num_attention_heads
-            self.self_attn = Attention(config)
+class CarsonMindBlock(nn.Module):
+    def __init__(self, layer_id:int, config:CarsonMindConfig):
+        super().__init__()
+        self.num_attention_heads = config.num_attention_heads
+        self.hidden_size = config.hidden_size
+        self.head_dim = self.hidden_size // self.num_attention_heads
+        self.self_attn = Attention(config)
 
-            self.layer_id = layer_id
-            self.input_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
-            self.post_attention_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
-            self.mlp = FeedForward(config)
+        self.layer_id = layer_id
+        self.input_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
+        self.mlp = FeedForward(config)
+    
+    def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+        residual = hidden_states
+        hidden_states,present_key_value = self.self_attn(   
+            position_embeddings,
+            past_key_value,
+            use_cache,
+            attention_mask,
+        )
+        hidden_states = residual + hidden_states
+        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        return hidden_states,present_key_value
+
+class CarsonMindModel(nn.Module):
+    def __init__(self, config:CarsonMindConfig):
+        super().__init__()
+        self.vocab_size,self.num_hidden_layers = (
+            config.vocab_size,
+            config.num_hidden_layers,
+        )
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         
-        def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
-            residual = hidden_states
-            hidden_states,present_key_value = self.self_attn(   
+        self.dropout = nn.Dropout(config.dropout)
+
+        self.layers = nn.ModuleList(
+            [CarsonMindBlock(i, config) for i in range(self.num_hidden_layers)]
+        )
+
+        self.norm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
+
+        # RoPE预计算
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            dim = config.hidden_size // config.num_attention_heads,
+            end = config.max_position_embeddings,
+            rope_base = config.rope_theta,
+            rope_scaling=config.rope_scaling,
+        )
+        self.register_buffer("freqs_cos", freqs_cos)
+        self.register_buffer("freqs_sin", freqs_sin)
+    
+    def forward(
+        self,
+        input_ids:Optional[torch.Tensor]=None,
+        attention_mask:Optional[torch.Tensor]=None,
+        past_key_values:Optional[List[Tuple[torch.Tensor,torch.Tensor]]]=None,
+        use_cache:bool=False,
+        **kwargs,
+    ):
+        batch_size,seq_length = input_ids.shape
+
+        if hasattr(past_key_values, 'layers'):
+            past_key_values = None
+        
+        past_key_values = past_key_values or [None] * len(self.layers)
+        start_pos = (
+            past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        )
+
+        hidden_states = self.dropout(self.embed_tokens(input_ids))
+
+        position_embeddings = (
+            self.freqs_cos[start_pos:start_pos+seq_length],
+            self.freqs_sin[start_pos:start_pos+seq_length],
+        )
+
+        presents = []
+
+        for layer_idx,(layer,past_key_value) in enumerate(
+            zip(self.layers,past_key_values)
+        ):
+            hidden_states,present = layer(
+                hidden_states,
                 position_embeddings,
-                past_key_value,
-                use_cache,
-                attention_mask,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                attention_mask=attention_mask,
             )
-            hidden_states = residual + hidden_states
-            hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
-            return hidden_states,present_key_value
+
+            presents.append(present)
+
+        hidden_states = self.norm(hidden_states)
+
+        return hidden_states,presents
+    
+# Huggingface提供的两个类：管理预训练模型和文本生成的类
+class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = CarsonMindConfig
+
+    def __init__(self, config:CarsonMindConfig):
+        # self.config = config
+        super().__init__(config)
+
+        self.model = CarsonMindModel(config)
+        self.lm_head = nn.Linear(
+            config.hidden_size, config.vocab_size, bias=False
+        )
+
+        # 权重共享
+        # 输出层的权重和嵌入层的权重共享
+        self.model.embed_tokens.weight = self.lm_head.weight
+
+        # huggingface自带的因果语言模型的输出
+        self.OUT = CausalLMOutputWithPast()
+
+    def forward(
+        self,
+        input_ids:Optional[torch.Tensor]=None,
+        attention_mask:Optional[torch.Tensor]=None,
+        past_key_values:Optional[List[Tuple[torch.Tensor,torch.Tensor]]]=None,
+        use_cache:bool=False,
+        logits_to_keep:Union[int,torch.Tensor]=0,
+        **kwargs,
+    ):
+        hidden_states,past_key_values = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            **kwargs,
+        )
+
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
+
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        self.OUT.__setitem__("last_hidden_state",hidden_states)
+        self.OUT.__setitem__("past_key_values",past_key_values)
+        self.OUT.__setitem__("logits",logits)
+
+        return self.OUT
