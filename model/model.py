@@ -76,6 +76,7 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 import torch.nn.functional as F
+from .activation_functions import ACT2FN
 
 # 继承nn.Module类
 class RMSNorm(nn.Module):
@@ -220,7 +221,7 @@ class Attention(nn.Module):
             past_key_value:Optional[Tuple[torch.Tensor,torch.Tensor]]=None, 
             use_cache = False,
             attention_mask:Optional[torch.Tensor]=None,
-    )->torch.Tensor:
+    ):
     # 投影，计算q,k,v
         bsz, seq_len, _  = x.shape
         xq,xk,kx = self.q_proj(x), self.k_proj(x), self.v_proj(x)
@@ -282,7 +283,59 @@ class Attention(nn.Module):
             scores = self.attn_dropout(scores)
             output = scores @ xv
         
-        #[bsz, n_local_heads, seq_len, head_dim]
+        # [bsz, n_local_heads, seq_len, head_dim]
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
+        # 结构图里也没画 linear之后的dropout
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
+    
+class FeedForward(nn.Module):
+    # 初始化
+    # 升维
+    # 降维
+    # 门控
+    # dropout
+    # 激活函数
+    def __init__(self, args:CarsonMindConfig):
+        super().__init__()
+        if args.intermediate_size is None:
+            intermediate_size = int(args.hidden_size*8/3)
+            args.intermediate_size = 64 * ((intermediate_size + 64 - 1) // 64)
+        
+        self.up_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(args.intermediate_size, args.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(args.dropout)
+        self.act_fn = ACT2FN[args.hidden_act]
+    
+    def forward(self, x:torch.Tensor)->torch.Tensor:
+        return self.dropout(
+            self.down_proj(
+                self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+                )
+            )
+    
+    class CarsonMindModel(nn.Module):
+        def __init__(self, layer_id:int, config:CarsonMindConfig):
+            super().__init__()
+            self.num_attention_heads = config.num_attention_heads
+            self.hidden_size = config.hidden_size
+            self.head_dim = self.hidden_size // self.num_attention_heads
+            self.self_attn = Attention(config)
+
+            self.layer_id = layer_id
+            self.input_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
+            self.post_attention_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
+            self.mlp = FeedForward(config)
+        
+        def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+            residual = hidden_states
+            hidden_states,present_key_value = self.self_attn(   
+                position_embeddings,
+                past_key_value,
+                use_cache,
+                attention_mask,
+            )
+            hidden_states = residual + hidden_states
+            hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+            return hidden_states,present_key_value
