@@ -76,7 +76,7 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 import torch.nn.functional as F
-from .activation_functions import ACT2FN
+from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -108,7 +108,7 @@ class RMSNorm(nn.Module):
 def precompute_freqs_cis(dim:int, end:int(32*1024), rope_base ,rope_scaling:Optional[dict]=None):
     # 初始化RoPE频率
     freqs, attn_factor = (
-        1.0/(rope_base**torch.arange(0,dim,2)[:(dim//2)].float() / dim), 
+        1.0/(rope_base**(torch.arange(0,dim,2)[:(dim//2)].float() / dim)), 
         1.0
     )
     if rope_scaling is not None:
@@ -219,7 +219,7 @@ class Attention(nn.Module):
     def forward(
             self, 
             x:torch.Tensor, 
-            position_embedding:Tuple[torch.Tensor,torch.Tensor], 
+            position_embeddings:Tuple[torch.Tensor,torch.Tensor], 
             past_key_value:Optional[Tuple[torch.Tensor,torch.Tensor]]=None, 
             use_cache = False,
             attention_mask:Optional[torch.Tensor]=None,
@@ -232,7 +232,7 @@ class Attention(nn.Module):
         k = xq.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
         v = xk.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
     # q和k，使用RoPE
-        cos,sin = position_embedding
+        cos,sin = position_embeddings
         xq,xk = apply_rotary_pos_emb(q,k,cos[:seq_len],sin[:seq_len])
     # 对于k和v，使用repeat（注意kv cache）
         if past_key_value is not None:
@@ -345,6 +345,7 @@ class CarsonMindBlock(nn.Module):
 class CarsonMindModel(nn.Module):
     def __init__(self, config:CarsonMindConfig):
         super().__init__()
+        self.config = config
         self.vocab_size,self.num_hidden_layers = (
             config.vocab_size,
             config.num_hidden_layers,
@@ -432,7 +433,7 @@ class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
         self.model.embed_tokens.weight = self.lm_head.weight
 
         # huggingface自带的因果语言模型的输出
-        self.OUT = CausalLMOutputWithPast()
+        # self.OUT = CausalLMOutputWithPast()
 
     def forward(
         self,
@@ -459,8 +460,12 @@ class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
 
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
-        self.OUT.__setitem__("last_hidden_state",hidden_states)
-        self.OUT.__setitem__("past_key_values",past_key_values)
-        self.OUT.__setitem__("logits",logits)
+        # self.OUT.__setitem__("last_hidden_state",hidden_states)
+        # self.OUT.__setitem__("past_key_values",past_key_values)
+        # self.OUT.__setitem__("logits",logits)
 
-        return self.OUT
+        return CausalLMOutputWithPast(
+            logits=logits,
+            past_key_values=past_key_values,
+            hidden_states=hidden_states,
+        )
