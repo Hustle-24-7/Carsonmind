@@ -105,7 +105,7 @@ class RMSNorm(nn.Module):
 # print(model(a))
 
 # 实现YaRN
-def precompute_freqs_cis(dim:int, end:int(32*1024), rope_base ,rope_scaling:Optional[dict]=None):
+def precompute_freqs_cis(dim:int, end:int, rope_base ,rope_scaling:Optional[dict]=None):
     # 初始化RoPE频率
     freqs, attn_factor = (
         1.0/(rope_base**(torch.arange(0,dim,2)[:(dim//2)].float() / dim)), 

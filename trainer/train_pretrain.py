@@ -15,7 +15,7 @@ from torch import optim  # 优化器
 from torch.nn.parallel import DistributedDataParallel  # 分布式数据并行
 from torch.utils.data import DataLoader, DistributedSampler  # 数据加载器
 
-from model.model import CarsonMindConfig
+from model.CarsonModel import CarsonMindConfig
 from dataset.lm_dataset import PretrainDataset
 from trainer.trainer_utils import (  # 训练工具函数
     get_lr,
@@ -227,7 +227,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)  # 确保保存目录存在
 
     # 创建MiniMind模型配置
-    lm_config = MokioMindConfig(
+    lm_config = CarsonMindConfig(
         hidden_size=args.hidden_size,
         num_hidden_layers=args.num_hidden_layers,
         use_moe=bool(args.use_moe),
