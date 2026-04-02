@@ -106,9 +106,10 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
             )  # ！修正：加入attention_mask参数
 
             # SFT总损失 = 主任务loss + 辅助loss（MoE路由辅助）
-            loss = (
-                res.loss + res.aux_loss
-            )  # ！修正：原手动计算loss_fct+loss_mask，现用模型内置的loss
+            # loss = (
+            #     res.loss + res.aux_loss
+            # )  # ！修正：原手动计算loss_fct+loss_mask，现用模型内置的loss
+            loss = res.loss
 
             # 📚 梯度累积
             # 将损失除以累积步数，实现梯度累积效果

@@ -74,7 +74,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             )  # ！修正：加入attention_mask
 
             # SFT总损失 = 主任务loss + 辅助loss（MoE路由辅助）
-            loss = res.loss + res.aux_loss
+            aux_loss = getattr(res, "aux_loss", 0.0)
+            loss = res.loss + aux_loss
 
             # 📚 梯度累积：将loss平均化
             # 在多个step后才进行参数更新，模拟更大的batch_size
@@ -105,23 +106,26 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             spend_time = time.time() - start_time
             # 恢复真实的loss值（乘回accumulation_steps）
             current_loss = loss.item() * args.accumulation_steps
-            # 获取辅助loss（如果存在）
-            current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
-            # 主任务loss = 总loss - 辅助loss
-            current_logits_loss = current_loss - current_aux_loss
+            # # 获取辅助loss（如果存在）
+            # current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
+            # # 主任务loss = 总loss - 辅助loss
+            # current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]["lr"]
             # 计算剩余时间（单位：分钟）
             eta_min = spend_time / (step + 1) * iters // 60 - spend_time // 60
 
+            # Logger(
+            #     f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min"
+            # )
             Logger(
-                f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min"
+                f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min"
             )
             if wandb:
                 wandb.log(
                     {
                         "loss": current_loss,
-                        "logits_loss": current_logits_loss,
-                        "aux_loss": current_aux_loss,
+                        # "logits_loss": current_logits_loss,
+                        # "aux_loss": current_aux_loss,
                         "learning_rate": current_lr,
                         "epoch_time": eta_min,
                     }
@@ -218,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="../dataset/sft_mini_512.jsonl",
+        default="../dataset/sft_t2t_mini.jsonl",
         help="训练数据路径",
     )
     parser.add_argument(
