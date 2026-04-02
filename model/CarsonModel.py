@@ -148,17 +148,17 @@ def precompute_freqs_cis(dim:int, end:int, rope_base ,rope_scaling:Optional[dict
             # ramp = 1时（低频）：系数为1/factor，缩放
             # 其他情况：平滑过渡
             freqs = freqs * (1 -ramp+ramp/factor)
-        # 根据end，生成位置索引t
-        t = torch.arange(end, device = freqs.device).float()
-        
-        #计算外积， 将t和频率相乘，得到每个位置的旋转角度
-        freqs = torch.outer(t, freqs).float()
+    # 根据end，生成位置索引t
+    t = torch.arange(end, device = freqs.device).float()
+    
+    #计算外积， 将t和频率相乘，得到每个位置的旋转角度
+    freqs = torch.outer(t, freqs).float()
 
-        freqs_cos = torch.cat([torch.cos(freqs),torch.cos(freqs)],dim=-1) * attn_factor
-        
-        freqs_sin = torch.cat([torch.sin(freqs),torch.sin(freqs)],dim=-1) * attn_factor
-        
-        return freqs_cos, freqs_sin
+    freqs_cos = torch.cat([torch.cos(freqs),torch.cos(freqs)],dim=-1) * attn_factor
+    
+    freqs_sin = torch.cat([torch.sin(freqs),torch.sin(freqs)],dim=-1) * attn_factor
+    
+    return freqs_cos, freqs_sin
 
 # 实现RoPE
 def apply_rotary_pos_emb(q,k,cos,sin,position_ids = None, unsqueeze_dim = 1):
@@ -192,9 +192,9 @@ class Attention(nn.Module):
         super().__init__()
         
         self.num_key_value_heads = (
-            args.num_key_value_heads 
-            if args.num_key_value_heads is not None
-            else args.num_attention_heads
+            args.num_attention_heads
+            if args.num_key_value_heads is None
+            else args.num_key_value_heads
         )
 
         assert args.num_attention_heads % self.num_key_value_heads == 0, \
@@ -226,14 +226,14 @@ class Attention(nn.Module):
     ):
     # 投影，计算q,k,v
         bsz, seq_len, _  = x.shape
-        xq,xk,kx = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        xq,xk,xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
     # 把输入拆分成多个头，用view
-        q = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
-        k = xq.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
-        v = xk.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+        xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
+        xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
     # q和k，使用RoPE
         cos,sin = position_embeddings
-        xq,xk = apply_rotary_pos_emb(q,k,cos[:seq_len],sin[:seq_len])
+        xq,xk = apply_rotary_pos_emb(xq,xk,cos[:seq_len],sin[:seq_len])
     # 对于k和v，使用repeat（注意kv cache）
         if past_key_value is not None:
             xk = torch.cat((past_key_value[0], xk), dim=1)
@@ -332,7 +332,8 @@ class CarsonMindBlock(nn.Module):
     
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         residual = hidden_states
-        hidden_states,present_key_value = self.self_attn(   
+        hidden_states,present_key_value = self.self_attn(  
+            self.input_layernorm(hidden_states),  # pre-norm 
             position_embeddings,
             past_key_value,
             use_cache,
@@ -413,7 +414,19 @@ class CarsonMindModel(nn.Module):
 
         hidden_states = self.norm(hidden_states)
 
-        return hidden_states,presents
+        # aux_loss = sum(
+        #     [
+        #         layer.mlp.aux_loss
+        #         for layer in self.layers
+        #         if isinstance(
+        #             layer.mlp, MoEFeedForward
+        #         )  # ！修正：原MoEFeedForaward拼写错误
+        #     ],
+        #     hidden_states.new_zeros(1).squeeze(),
+        # )
+        return hidden_states, presents
+        # return hidden_states, presents, aux_loss
+        
     
 # Huggingface提供的两个类：管理预训练模型和文本生成的类
 class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
@@ -439,6 +452,7 @@ class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
         self,
         input_ids:Optional[torch.Tensor]=None,
         attention_mask:Optional[torch.Tensor]=None,
+        labels: Optional[torch.Tensor] = None,
         past_key_values:Optional[List[Tuple[torch.Tensor,torch.Tensor]]]=None,
         use_cache:bool=False,
         logits_to_keep:Union[int,torch.Tensor]=0,
@@ -451,6 +465,13 @@ class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             **kwargs,
         )
+        # hidden_states, past_key_values, aux_loss = self.model(
+        #     input_ids=input_ids,
+        #     attention_mask=attention_mask,
+        #     past_key_values=past_key_values,
+        #     use_cache=use_cache,
+        #     **args,
+        # )
 
         slice_indices = (
             slice(-logits_to_keep, None)
@@ -460,12 +481,21 @@ class CarsonMindForCausalLM(PreTrainedModel, GenerationMixin):
 
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
-        # self.OUT.__setitem__("last_hidden_state",hidden_states)
-        # self.OUT.__setitem__("past_key_values",past_key_values)
-        # self.OUT.__setitem__("logits",logits)
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
 
-        return CausalLMOutputWithPast(
+        output = CausalLMOutputWithPast(
+            loss=loss,
             logits=logits,
             past_key_values=past_key_values,
             hidden_states=hidden_states,
         )
+        # output.aux_loss = aux_loss
+        return output

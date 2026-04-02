@@ -31,7 +31,7 @@ class PretrainDataset(Dataset):
     # 需要加上EOS，BOS，PAD
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
-        input_ids = torch.Tensor(input_ids,dtype=torch.long)
+        input_ids = torch.tensor(input_ids,dtype=torch.long)
     # 需要自行编写labels，防止PAD参与loss计算，即将PAD的label设置为-100
         labels = input_ids.clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
