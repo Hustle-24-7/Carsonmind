@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 import torch
 import os
 import random
-from datasets import load_dataset
+from datasets import load_dataset, Features, Sequence, Value
 
 # 禁用 HuggingFace tokenizer 的多进程并行，避免在 DataLoader 多进程环境中产生死锁
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -111,7 +111,8 @@ class SFTDataset(Dataset):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = load_dataset("json", data_files=jsonl_path, split="train")
+        features = Features({'conversations': [{'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'), 'tools': Value('string'), 'tool_calls': Value('string')}]})
+        self.samples = load_dataset("json", data_files=jsonl_path, split="train", features=features) # 这里有个sft数据集，每行数据集格式可能不同的坑，须传入指定好的features
         # 预先 tokenize assistant 回复的起始标记（BOS + "assistant\n"）
         # 用于在 generate_labels 中定位每段 assistant 回复的开始位置
         self.bos_id = tokenizer(
@@ -137,16 +138,34 @@ class SFTDataset(Dataset):
         - add_generation_prompt=False：不在末尾追加"请模型续写"的 prompt，
           因为训练时需要完整的 input+output 序列，而非开放续写。
         """
-        messages = conversations.copy()
-        tools = (
-            conversations[0]["functions"]
-            if (
-                conversations
-                and conversations[0]["role"] == "system"
-                and conversations[0].get("functions")
-            )
-            else None
-        )
+        
+        # 先对提取全局 tools，转换tool_calls为python对象，用 chat template 渲染完整对话字符串
+        # 期望的 messages 格式
+        # messages = [
+        #     {"role": "system", "content": "You are helpful"},
+        #     {"role": "user", "content": "Hi"},
+        #     {"role": "assistant", "content": "Hello"}
+        # ]   
+        messages = []
+        tools = None
+
+        for message in conversations:
+            message = dict(message)
+            if message.get("role") == "system" and message.get("tools"):
+                tools = json.loads(message["tools"]) if isinstance(message["tools"], str) else message["tools"]
+            if message.get("tool_calls") and isinstance(message["tool_calls"], str):
+                message["tool_calls"] = json.loads(message["tool_calls"])
+            messages.append(message)
+
+        # tools = (
+        #     conversations[0]["functions"]
+        #     if (
+        #         conversations
+        #         and conversations[0]["role"] == "system"
+        #         and conversations[0].get("functions")
+        #     )
+        #     else None
+        # )
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, tools=tools
         )
