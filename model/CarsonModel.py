@@ -495,7 +495,11 @@ class CarsonMindBlock(nn.Module):
         self.layer_id = layer_id
         self.input_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
-        self.mlp = FeedForward(config)
+        self.mlp = (
+            FeedForward(config)
+            if not config.use_moe
+            else MoEFeedForward(config)  
+        )
     
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         residual = hidden_states

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.CarsonModel import CarsonMindConfig, CarsonMindForCausalLM
-# from model.model_lora import apply_lora, load_lora  # ！修正：原缺少LoRA加载支持
+from model.model_lora import apply_lora, load_lora  # ！修正：原缺少LoRA加载支持
 from trainer.trainer_utils import setup_seed
 
 warnings.filterwarnings("ignore")
@@ -31,12 +31,12 @@ def init_model(args):
         )  # ！修正：原strict=False会静默忽略丢失/多余的权重键
 
         # ！修正：原缺少LoRA加载逻辑
-        # if args.lora_weight != "None":
-        #     apply_lora(model)
-        #     load_lora(
-        #         model,
-        #         f"./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth",
-        #     )
+        if args.lora_weight != "None":
+            apply_lora(model)
+            load_lora(
+                model,
+                f"./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth",
+            )
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.load_from, trust_remote_code=True
@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--save_dir", default="out", type=str, help="模型权重目录")
     parser.add_argument(
         "--weight",
-        default="pretrain",
+        default="full_sft",
         type=str,
         help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）",
     )
